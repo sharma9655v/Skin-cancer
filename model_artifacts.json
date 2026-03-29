@@ -1,0 +1,52 @@
+{
+  "classes": [
+    "Actinic Keratoses",
+    "Basal Cell Carcinoma",
+    "Benign Keratosis",
+    "Dermatofibroma",
+    "Melanoma",
+    "Melanocytic Nevi",
+    "Vascular Lesion"
+  ],
+  "class_map": {
+    "akiec": "Actinic Keratoses",
+    "bcc": "Basal Cell Carcinoma",
+    "bkl": "Benign Keratosis",
+    "df": "Dermatofibroma",
+    "mel": "Melanoma",
+    "nv": "Melanocytic Nevi",
+    "vasc": "Vascular Lesion"
+  },
+  "metadata_cols": [
+    "age_norm",
+    "sex_encoded",
+    "loc_abdomen",
+    "loc_acral",
+    "loc_back",
+    "loc_chest",
+    "loc_ear",
+    "loc_face",
+    "loc_foot",
+    "loc_genital",
+    "loc_hand",
+    "loc_lower extremity",
+    "loc_neck",
+    "loc_scalp",
+    "loc_trunk",
+    "loc_unknown",
+    "loc_upper extremity"
+  ],
+  "num_meta_features": 17,
+  "img_size": 224,
+  "model_backbone": "EfficientNetB4",
+  "training_phases": 2,
+  "v6_features": {
+    "focal_loss": {
+      "alpha": 0.25,
+      "gamma": 2.0
+    },
+    "cutmix_mixup": true,
+    "cross_attention_fusion": true,
+    "hair_removal": "available_at_inference"
+  }
+}
