@@ -25,6 +25,7 @@ from reportlab.platypus import (
 from reportlab.lib.styles import getSampleStyleSheet
 from reportlab.lib import colors
 from reportlab.lib.units import inch
+import requests
 
 # ================= PAGE CONFIG =================
 st.set_page_config(page_title="AI Skin Cancer Detection", page_icon="🧬", layout="wide")
@@ -411,9 +412,21 @@ def find_similar_cases(feature_vector, top_k=3):
 # ================= GRAD-CAM =================
 @st.cache_resource
 def load_local_model():
-    """Load the best available model (v7 > v2 > v1)."""
     base_dir = os.path.dirname(os.path.abspath(__file__))
     
+    MODEL_PATH = os.path.join(base_dir, "skin_model.h5")
+    MODEL_URL = "https://huggingface.co/vanshikatomar/Skin-Cancer-model/resolve/main/skin_cancer_model_v7_best.h5"
+
+    # Download model
+    if not os.path.exists(MODEL_PATH):
+        st.info("Downloading AI model... please wait ⏳")
+        with open(MODEL_PATH, "wb") as f:
+            f.write(requests.get(MODEL_URL).content)
+
+    # ✅ Load downloaded model FIRST
+    if os.path.exists(MODEL_PATH):
+        return tf.keras.models.load_model(MODEL_PATH, compile=False)
+
     # Try v7 model first (highest accuracy)
     model_path_v7 = os.path.join(base_dir, "skin_cancer_model_v7.h5")
     if os.path.exists(model_path_v7):
