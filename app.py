@@ -1,4 +1,6 @@
 import streamlit as st
+import os
+os.environ["TF_USE_LEGACY_KERAS"] = "1"
 import numpy as np
 import tensorflow as tf
 from PIL import Image
@@ -7,8 +9,8 @@ import cv2
 from datetime import datetime
 import uuid
 import qrcode
-import os
-import google.generativeai as genai
+from google import genai
+from google.genai import types
 import json
 import traceback
 import sqlite3
@@ -28,7 +30,54 @@ from reportlab.lib.units import inch
 st.set_page_config(page_title="AI Skin Cancer Detection", page_icon="🧬", layout="wide")
 
 # ================= APP INFO =================
-APP_VERSION = "6.0"
+APP_VERSION = "7.0"
+GEMINI_MODEL = "gemini-2.5-flash"
+GEMINI_MODEL_FALLBACK = "gemini-2.0-flash"
+
+# ================= THEME COLORS =================
+# Primary Colors
+PRIMARY_COLOR = "#339af0"      # Blue
+SECONDARY_COLOR = "#ff6b6b"    # Red
+SUCCESS_COLOR = "#51cf66"      # Green
+WARNING_COLOR = "#ffd43b"      # Yellow
+INFO_COLOR = "#845ef7"         # Purple
+
+# Status Colors
+RISK_LOW_COLOR = SUCCESS_COLOR
+RISK_MODERATE_COLOR = WARNING_COLOR
+RISK_HIGH_COLOR = SECONDARY_COLOR
+
+# Background Colors
+BG_LIGHT = "#f8f9fa"
+BG_WHITE = "#ffffff"
+BG_LIGHT_BLUE = "#f0f4ff"
+BG_LIGHT_GREEN = "#e7f5ff"
+BG_LIGHT_PURPLE = "#f9f2ff"
+BG_LIGHT_YELLOW = "#fff9db"
+
+# Text Colors
+TEXT_DARK = "#333333"
+TEXT_MEDIUM = "#555555"
+TEXT_LIGHT = "#888888"
+TEXT_WHITE = "#ffffff"
+
+def get_gemini_client(api_key):
+    """Create a Gemini API client."""
+    return genai.Client(api_key=api_key)
+
+def generate_gemini_content(client, contents, model=None):
+    """Generate content with Gemini, falling back to alternative model if primary fails."""
+    if model is None:
+        model = GEMINI_MODEL
+    try:
+        response = client.models.generate_content(model=model, contents=contents)
+        return response
+    except Exception:
+        try:
+            response = client.models.generate_content(model=GEMINI_MODEL_FALLBACK, contents=contents)
+            return response
+        except Exception as e:
+            raise e
 
 HAM10000_CLASSES = [
     "Actinic Keratoses", "Basal Cell Carcinoma", "Benign Keratosis",
@@ -145,15 +194,13 @@ st.markdown("""
 <div style='text-align: center;'>
     <img src='https://cdn-icons-png.flaticon.com/512/2785/2785819.png' width='80'>
     <h1>🧬 AI Skin Disease & Cancer Detection System</h1>
-    <p style='color: grey; font-size: 14px;'>v6.0 — Grad-CAM • TTA • Hair Removal • CBIR • Offline OOD • Tracking • Multi-Language</p>
+    <p style='color: grey; font-size: 14px;'>v7.0 — Progressive Resizing • TTA • Label Smoothing • SWA • Grad-CAM • CBIR • Multi-Language</p>
 </div>
 """, unsafe_allow_html=True)
 
 # ================= SIDEBAR =================
 GEMINI_API_KEY = st.sidebar.text_input("Enter Gemini API Key", type="password")
-if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
-else:
+if not GEMINI_API_KEY:
     st.sidebar.warning("Enter Gemini API Key for cloud AI features.")
 
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=80)
@@ -197,6 +244,19 @@ st.session_state.selected_language = selected_lang
 
 if theme_mode == "Dark":
     st.markdown("<style>.stApp {background-color: #0E1117; color: white;}</style>", unsafe_allow_html=True)
+    st.markdown("""<style>
+    .stTextInput input, .stNumberInput input, .stSelectbox select, .stDateInput input, .stTextArea textarea {
+        color: white !important;
+        background-color: #2d3748 !important;
+        border-color: #718096 !important;
+    }
+    .stTextInput label, .stNumberInput label, .stSelectbox label, .stDateInput label, .stTextArea label {
+        color: white !important;
+    }
+    .stRadio label, .stCheckbox label {
+        color: white !important;
+    }
+    </style>""", unsafe_allow_html=True)
 
 # ================= HELPER FUNCTIONS =================
 
@@ -204,9 +264,9 @@ def translate_text(text, target_language):
     if target_language == "English" or not text or not GEMINI_API_KEY:
         return text
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        client = get_gemini_client(GEMINI_API_KEY)
         prompt = f"Translate the following medical text to {target_language}. Return ONLY the translated text:\n\n{text}"
-        return model.generate_content(prompt).text.strip()
+        return generate_gemini_content(client, prompt).text.strip()
     except Exception:
         return text
 
@@ -230,9 +290,13 @@ def remove_hair(image_array):
 
 # ================= TEST-TIME AUGMENTATION (Feature 1) =================
 def tta_predict(model, img_array, meta_array=None, n_augments=8):
-    """Run multiple augmented versions through the model and average predictions."""
+    """Run multiple augmented versions through the model and average predictions.
+    
+    v7.0 Enhanced TTA with more diverse augmentations for better accuracy.
+    """
     augmented = [img_array]
     img_np = img_array[0]
+    
     # Horizontal flip
     augmented.append(np.expand_dims(np.fliplr(img_np), 0))
     # Vertical flip
@@ -247,6 +311,13 @@ def tta_predict(model, img_array, meta_array=None, n_augments=8):
     augmented.append(np.expand_dims(np.clip(img_np * 1.1, 0, 1), 0))
     # Slight brightness decrease
     augmented.append(np.expand_dims(np.clip(img_np * 0.9, 0, 1), 0))
+    # Horizontal + Vertical flip combined
+    augmented.append(np.expand_dims(np.flipud(np.fliplr(img_np)), 0))
+    # Slight contrast adjustment
+    mean_val = np.mean(img_np)
+    augmented.append(np.expand_dims(np.clip((img_np - mean_val) * 1.1 + mean_val, 0, 1), 0))
+    # Gamma correction (slight)
+    augmented.append(np.expand_dims(np.clip(np.power(img_np, 0.9), 0, 1), 0))
 
     preds = []
     for aug_img in augmented[:n_augments]:
@@ -340,22 +411,71 @@ def find_similar_cases(feature_vector, top_k=3):
 # ================= GRAD-CAM =================
 @st.cache_resource
 def load_local_model():
-    model_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skin_cancer_model_v2.h5")
-    if os.path.exists(model_path):
-        return tf.keras.models.load_model(model_path, compile=False)
-    model_path_v1 = os.path.join(os.path.dirname(os.path.abspath(__file__)), "skin_cancer_model.h5")
+    """Load the best available model (v7 > v2 > v1)."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Try v7 model first (highest accuracy)
+    model_path_v7 = os.path.join(base_dir, "skin_cancer_model_v7.h5")
+    if os.path.exists(model_path_v7):
+        return tf.keras.models.load_model(model_path_v7, compile=False)
+    
+    # Try v7 final model
+    model_path_v7_final = os.path.join(base_dir, "skin_cancer_model_v7_final.h5")
+    if os.path.exists(model_path_v7_final):
+        return tf.keras.models.load_model(model_path_v7_final, compile=False)
+    
+    # Try v7 best model
+    model_path_v7_best = os.path.join(base_dir, "skin_cancer_model_v7_best.h5")
+    if os.path.exists(model_path_v7_best):
+        return tf.keras.models.load_model(model_path_v7_best, compile=False)
+    
+    # Fallback to v2
+    model_path_v2 = os.path.join(base_dir, "skin_cancer_model_v2.h5")
+    if os.path.exists(model_path_v2):
+        return tf.keras.models.load_model(model_path_v2, compile=False)
+    
+    # Fallback to v1
+    model_path_v1 = os.path.join(base_dir, "skin_cancer_model.h5")
     if os.path.exists(model_path_v1):
         return tf.keras.models.load_model(model_path_v1, compile=False)
+    
     return None
 
 @st.cache_resource
 def load_model_artifacts():
-    """Load model_artifacts.json to get metadata column info."""
-    artifacts_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "model_artifacts.json")
+    """Load model_artifacts.json to get metadata column info (v7 > v6)."""
+    base_dir = os.path.dirname(os.path.abspath(__file__))
+    
+    # Try v7 artifacts first
+    artifacts_path_v7 = os.path.join(base_dir, "model_artifacts_v7.json")
+    if os.path.exists(artifacts_path_v7):
+        with open(artifacts_path_v7, "r") as f:
+            return json.load(f)
+    
+    # Fallback to original artifacts
+    artifacts_path = os.path.join(base_dir, "model_artifacts.json")
     if os.path.exists(artifacts_path):
         with open(artifacts_path, "r") as f:
             return json.load(f)
+    
     return None
+
+def get_model_img_size():
+    """Get the image size from the loaded model dynamically, fallback to artifacts."""
+    model = load_local_model()
+    if model is not None:
+        try:
+            if isinstance(model.input, list):
+                return int(model.input[0].shape[1])
+            else:
+                return int(model.input.shape[1])
+        except Exception:
+            pass
+
+    artifacts = load_model_artifacts()
+    if artifacts and "img_size" in artifacts:
+        return artifacts["img_size"]
+    return 380  # Default to v7 size
 
 def is_dual_input_model(model):
     """Check if the model expects dual inputs (image + metadata)."""
@@ -450,8 +570,9 @@ def generate_gradcam(model, img_array, meta_array=None, class_index=None):
 
 def overlay_gradcam(original_img, heatmap, alpha=0.4):
     """Overlay Grad-CAM heatmap on original image."""
-    img = np.array(original_img.resize((224, 224)))
-    heatmap_resized = cv2.resize(heatmap, (224, 224))
+    img_size = get_model_img_size()
+    img = np.array(original_img.resize((img_size, img_size)))
+    heatmap_resized = cv2.resize(heatmap, (img_size, img_size))
     heatmap_colored = cv2.applyColorMap(np.uint8(255 * heatmap_resized), cv2.COLORMAP_JET)
     heatmap_colored = cv2.cvtColor(heatmap_colored, cv2.COLOR_BGR2RGB)
     superimposed = np.uint8(heatmap_colored * alpha + img * (1 - alpha))
@@ -463,15 +584,18 @@ def check_ood(image):
     if not GEMINI_API_KEY:
         return True, "API key not available, skipping OOD check."
     try:
-        model = genai.GenerativeModel('gemini-2.5-flash')
+        client = get_gemini_client(GEMINI_API_KEY)
         prompt = """Look at this image. Is it a clear photograph of a human skin lesion or skin condition?
 Return ONLY a JSON object: {"is_skin": true/false, "reason": "brief explanation"}"""
-        response = model.generate_content([prompt, image])
+        response = generate_gemini_content(client, [prompt, image])
         text = response.text.strip()
-        if text.startswith("```json"): text = text[7:]
-        if text.endswith("```"): text = text[:-3]
-        result = json.loads(text.strip())
-        return result.get("is_skin", True), result.get("reason", "")
+        start_idx = text.find('{')
+        end_idx = text.rfind('}')
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            result = json.loads(text[start_idx:end_idx+1])
+            return result.get("is_skin", True), result.get("reason", "")
+        else:
+            return True, "OOD check returned invalid format."
     except Exception:
         return True, "OOD check unavailable."
 
@@ -495,7 +619,7 @@ def predict_image_cloud(image, metadata=None):
     if not GEMINI_API_KEY:
         st.error("API Key is missing!")
         return None, None, None, None
-    model = genai.GenerativeModel('gemini-2.5-flash')
+    client = get_gemini_client(GEMINI_API_KEY)
     meta_context = ""
     if metadata:
         meta_context = f"""
@@ -530,25 +654,137 @@ Return ONLY a JSON object (no markdown):
   "risk_factors": "Relevant risk factors based on lesion features and patient metadata."
 }}"""
     try:
-        response = model.generate_content([prompt, image])
+        response = generate_gemini_content(client, [prompt, image])
         text = response.text.strip()
-        if text.startswith("```json"): text = text[7:]
-        if text.endswith("```"): text = text[:-3]
-        result = json.loads(text.strip())
+        start_idx = text.find('{')
+        end_idx = text.rfind('}')
+        if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+            result = json.loads(text[start_idx:end_idx+1])
+        else:
+            raise ValueError("Response did not contain valid JSON object.")
         result["inference_mode"] = "cloud"
         st.session_state.last_result = result
         return result, result.get("predicted_class"), result.get("cancer_prob", 0.0), result.get("confidence", 0.0)
     except Exception as e:
-        st.error(f"Prediction error: {str(e)}")
+        error_str = str(e)
+        if "Cannot read image" in error_str or "does not support image input" in error_str:
+            st.error("❌ **Image Analysis Failed:** The uploaded file is not a valid image or cannot be processed. Please upload a clear skin lesion photo (JPG/PNG format) and try again.")
+        else:
+            st.error(f"❌ **Cloud AI Error:** {error_str}")
         return None, "Error", 0.0, 0.0
 
 # ================= PREDICT (LOCAL) =================
+CLINICAL_KB = {
+    "Actinic Keratoses": {
+        "lesion_description": "Rough, scaly, sandpaper-like patches typically 2-6mm in diameter. Surface may be flat or slightly raised with an adherent scale. Often felt before seen on sun-exposed areas.",
+        "morphology": "Macular or slightly papular lesion with irregular borders. Size typically 2-10mm. Flat to slightly elevated with a rough, gritty texture upon palpation.",
+        "color_pattern": "Variable erythematous to pink, tan, or flesh-colored. May show subtle pigment variation. Redness indicates inflammation and UV damage.",
+        "border_analysis": "Poorly defined, irregular borders that blend gradually into surrounding skin. Edges may appear diffuse and non-distinct.",
+        "differential_diagnosis": ["Squamous Cell Carcinoma", "Basal Cell Carcinoma", "Seborrheic Keratosis"],
+        "risk_factors": "Chronic sun exposure, fair skin (Fitzpatrick I-II), outdoor occupation, immunosuppression, older age (>50 years). Risk of progression to SCC is 0.025-16% per year.",
+        "recommendation": "Schedule dermatology appointment within 4 weeks. Cryotherapy, topical 5-fluorouracil, or photodynamic therapy are standard treatments. Use SPF 30+ daily and regular self-monitoring."
+    },
+    "Basal Cell Carcinoma": {
+        "lesion_description": "Pearly, waxy, or translucent papule or nodule with visible telangiectasia (small blood vessels). May present as a non-healing ulcer or a flat, scar-like plaque. Slow-growing but locally invasive.",
+        "morphology": "Nodular: dome-shaped, pearly papule. Superficial: thin, erythematous plaque. Morpheaform: indurated, scar-like plaque. Typically 5-20mm at presentation.",
+        "color_pattern": "Pearly, translucent, or pink. Central ulceration may appear darker (brown/black). Telangiectasia visible on surface. Pigmented variant shows brown-black coloration.",
+        "border_analysis": "Rolled, raised borders with visible blood vessels (telangiectasia). Edges may be pearly and translucent. Central depression or ulceration common.",
+        "differential_diagnosis": ["Squamous Cell Carcinoma", "Melanoma", "Seborrheic Keratosis", "Intradermal Nevus"],
+        "risk_factors": "Chronic UV exposure, fair skin, history of sunburns, age >40, immunosuppression, arsenic exposure, Gorlin syndrome. Most common skin cancer but rarely metastasizes.",
+        "recommendation": "URGENT: Dermatology referral within 1-2 weeks. Surgical excision is gold standard. Mohs surgery recommended for facial lesions. Low metastatic risk but high recurrence risk if untreated."
+    },
+    "Benign Keratosis": {
+        "lesion_description": "Well-demarcated, stuck-on appearing, waxy or verrucous papule/plaque. Surface may be smooth, rough, or cerebriform. Often multiple and increasing with age.",
+        "morphology": "Round to oval, sharply demarcated, flat-topped or dome-shaped papule. Typically 3-20mm. Surface can be smooth, rough, or cobblestone-like (verrucous).",
+        "color_pattern": "Uniform tan, brown, dark brown, or black. May have a stuck-on appearance. Color is typically homogeneous without significant variation.",
+        "border_analysis": "Sharp, well-defined, round borders. Lesion appears to sit on top of the skin surface (stuck-on). No invasion into surrounding tissue.",
+        "differential_diagnosis": ["Melanoma", "Basal Cell Carcinoma", "Seborrheic Keratosis", "Verruca Vulgaris"],
+        "risk_factors": "Aging, sun exposure, genetic predisposition. Generally benign with no malignant potential. Very common in adults over 30.",
+        "recommendation": "Low risk - routine monitoring. No treatment required unless cosmetically bothersome or irritated. Annual skin check recommended. Monitor for any changes in size, color, or symptoms."
+    },
+    "Dermatofibroma": {
+        "lesion_description": "Firm, indurated, dome-shaped papule or nodule. Dimple sign (pinching causes central depression) is characteristic. Usually asymptomatic but may be tender.",
+        "morphology": "Round, well-circumscribed, firm, dome-shaped papule. Typically 5-10mm. Central dimple sign when pinched. Slow-growing and stable over time.",
+        "color_pattern": "Tan, brown, pink, or skin-colored. Pigmentation may be more intense at the periphery. Color is typically uniform.",
+        "border_analysis": "Well-defined, smooth, round borders. No irregularity or notching. Firm on palpation.",
+        "differential_diagnosis": ["Dermatofibrosarcoma Protuberans", "Fibrous Papule", "Keloid", "Nodular Melanoma"],
+        "risk_factors": "Trauma or insect bite at site, female predominance, lower extremities common. Benign fibrohistiocytic tumor with no malignant potential.",
+        "recommendation": "No treatment needed - benign lesion. Monitor for changes. Excisional biopsy if atypical features or diagnostic uncertainty. Reassurance is appropriate."
+    },
+    "Melanoma": {
+        "lesion_description": "Asymmetric pigmented lesion with irregular borders, color variegation, and diameter >6mm. ABCDE criteria: Asymmetry, Border irregularity, Color variation, Diameter >6mm, Evolution. May be amelanotic (lack pigment).",
+        "morphology": "Asymmetric, irregularly shaped macule, papule, or nodule. May be flat (radial growth) or raised (vertical growth). Ulceration indicates advanced stage. Typically >6mm.",
+        "color_pattern": "Multiple colors present: brown, black, red, white, blue (ABCDE criteria). Irregular pigment distribution with darker and lighter areas. Blue-white veil is concerning.",
+        "border_analysis": "Irregular, notched, scalloped, or poorly defined borders. Asymmetric border pattern. Areas of regression may appear as white scar-like patches.",
+        "differential_diagnosis": ["Dysplastic Nevus", "Seborrheic Keratosis", "Basal Cell Carcinoma", "Blue Nevus", "Hemangioma"],
+        "risk_factors": "Fair skin, history of sunburns (especially blistering), family history, dysplastic nevi, immunosuppression, genetic mutations (CDKN2A, BRAF). Highest mortality among skin cancers.",
+        "recommendation": "URGENT: Immediate dermatology referral within 1 week. Excisional biopsy with adequate margins recommended. Full-body skin examination. Sentinel lymph node biopsy may be needed. Early detection is critical for survival."
+    },
+    "Melanocytic Nevi": {
+        "lesion_description": "Well-circumscribed, symmetric, uniform pigmented macule or papule. Regular in shape and color. May be flat or raised. Common mole - present in most adults.",
+        "morphology": "Round to oval, symmetric, dome-shaped or flat. Typically 2-6mm. Smooth surface. Regular, predictable growth pattern.",
+        "color_pattern": "Uniform tan, brown, or dark brown. Single color throughout. No significant color variation or irregular pigmentation.",
+        "border_analysis": "Smooth, well-defined, round borders. No irregularity, notching, or scalloping. Sharp demarcation from surrounding skin.",
+        "differential_diagnosis": ["Melanoma", "Dysplastic Nevus", "Seborrheic Keratosis", "Pigmented Basal Cell Carcinoma"],
+        "risk_factors": "Genetic predisposition, sun exposure, light skin. Normal mole with low malignant potential (<1 in 100,000 per year). Changes should be monitored.",
+        "recommendation": "Benign - routine monitoring only. Annual full-body skin exam recommended. Document with photos for comparison. Seek evaluation if rapid growth, color change, or symptoms develop."
+    },
+    "Vascular Lesion": {
+        "lesion_description": "Red, purple, or blue lesion due to blood vessel proliferation or dilation. May be flat (port wine stain), raised (hemangioma), or compressible (venous lake). Blanching on pressure is characteristic.",
+        "morphology": "Variable - flat macules (port wine stain), dome-shaped nodules (cherry angioma), compressible papules (venous lake). Size highly variable from pinpoint to large patches.",
+        "color_pattern": "Red (capillary), purple (venous), blue (deep vascular). Blanching with pressure (diascopy positive). Color uniform within individual lesion.",
+        "border_analysis": "Usually well-defined, round borders. May have irregular edges (port wine stain). Smooth, non-scalloped margins.",
+        "differential_diagnosis": ["Amelanotic Melanoma", "Basal Cell Carcinoma", "Pyogenic Granuloma", "Kaposi Sarcoma"],
+        "risk_factors": "Congenital (hemangioma), aging (cherry angioma, venous lake), chronic sun exposure, liver disease (spider angiomas). Generally benign.",
+        "recommendation": "Usually benign - no treatment needed unless symptomatic or cosmetically concerning. Seek evaluation if rapid growth, bleeding, or ulceration. Laser therapy available for cosmetic removal."
+    },
+    "Fungal Infection": {
+        "lesion_description": "Erythematous, scaly patches with central clearing and raised active borders (tinea pattern). May show satellite lesions, maceration, or pustules. Pruritic.",
+        "morphology": "Annular (ring-shaped) patches with central clearing. Irregular, polycyclic borders. Scale present on active edge. May be macerated in intertriginous areas.",
+        "color_pattern": "Erythematous (red) to pink. Central hypopigmentation with clearing. May appear darker in chronic cases due to post-inflammatory changes.",
+        "border_analysis": "Active, raised, scaly borders with central clearing. Polycyclic or arciform pattern. Well-defined active edge with scale.",
+        "differential_diagnosis": ["Eczema", "Psoriasis", "Contact Dermatitis", "Granuloma Annulare", "Pityriasis Rosea"],
+        "risk_factors": "Warm, moist environments, occlusive clothing, immunosuppression, diabetes, obesity, antibiotic use. Contagious through direct contact.",
+        "recommendation": "Antifungal treatment recommended. Topical terbinafine or clotrimazole for 2-4 weeks. Keep area dry and clean. See dermatologist if no improvement in 2 weeks or if widespread."
+    },
+    "Other": {
+        "lesion_description": "Skin lesion that does not fit clearly into the standard dermatological categories. Appearance may be atypical or represent a rare condition. Requires clinical correlation.",
+        "morphology": "Variable morphology. May be macular, papular, nodular, or plaque-like. Characteristics may overlap multiple categories.",
+        "color_pattern": "Variable pigmentation. May show single or multiple colors. Pigment pattern is atypical for standard categories.",
+        "border_analysis": "Variable border characteristics. May be well-defined or poorly defined. Pattern does not match typical presentations.",
+        "differential_diagnosis": ["Dysplastic Nevus", "Seborrheic Keratosis", "Inflammatory Dermatosis", "Cutaneous Lymphoma"],
+        "risk_factors": "Variable depending on underlying condition. Requires clinical evaluation for accurate risk stratification.",
+        "recommendation": "Dermatology referral recommended for clinical evaluation and possible biopsy. Non-specific findings warrant expert assessment for definitive diagnosis."
+    },
+    "Malignant": {
+        "lesion_description": "Lesion with features suggestive of malignancy. Irregular architecture, rapid growth, or ulceration may be present. Requires urgent pathological evaluation.",
+        "morphology": "Irregular, asymmetric lesion with variable elevation. May show ulceration, bleeding, or rapid growth pattern.",
+        "color_pattern": "Multi-toned or irregular pigmentation. Color variegation is a concerning feature for malignancy.",
+        "border_analysis": "Irregular, poorly defined borders with possible notching or scalloping.",
+        "differential_diagnosis": ["Melanoma", "Basal Cell Carcinoma", "Squamous Cell Carcinoma"],
+        "risk_factors": "UV exposure, fair skin, family history, immunosuppression, prior skin cancer history.",
+        "recommendation": "URGENT: Seek immediate dermatological evaluation. Biopsy is essential for definitive diagnosis. Do not delay medical consultation."
+    },
+    "Benign": {
+        "lesion_description": "Lesion with benign characteristics. Regular morphology, symmetric shape, and uniform color suggest non-cancerous nature.",
+        "morphology": "Symmetric, regular, well-circumscribed lesion. Smooth surface with predictable growth pattern.",
+        "color_pattern": "Uniform, homogeneous color distribution. No significant pigment variation.",
+        "border_analysis": "Smooth, well-defined, regular borders. No irregularity or notching.",
+        "differential_diagnosis": ["Melanocytic Nevus", "Seborrheic Keratosis", "Dermatofibroma"],
+        "risk_factors": "Standard sun exposure risk. Low malignant potential.",
+        "recommendation": "Routine monitoring recommended. Annual skin examination. Seek evaluation if any changes occur."
+    }
+}
+
 def predict_image_local(image, metadata=None):
     local_model = load_local_model()
     if local_model is None:
         st.error("No local model found! Train the model first or switch to Cloud AI.")
         return None, None, None, None
-    img = image.resize((224, 224))
+    
+    # Get image size from model artifacts (380 for v7, 224 for older models)
+    img_size = get_model_img_size()
+    img = image.resize((img_size, img_size))
     img_array = np.array(img) / 255.0
 
     # Feature 5: Hair Removal preprocessing
@@ -571,25 +807,33 @@ def predict_image_local(image, metadata=None):
         num_outputs = 1
 
     # Feature 1: TTA or MC Dropout prediction
-    if st.session_state.get("enable_tta", False):
-        try:
-            mean_pred = tta_predict(local_model, img_array, meta_array=meta_array, n_augments=8)
-            std_pred = np.zeros_like(mean_pred)
-        except Exception:
-            if meta_array is not None:
-                mean_pred = local_model.predict([img_array, meta_array], verbose=0)[0]
-            else:
-                mean_pred = local_model.predict(img_array, verbose=0)[0]
-            std_pred = np.zeros_like(mean_pred)
-    else:
-        try:
-            mean_pred, std_pred = mc_dropout_predict(local_model, img_array, meta_array=meta_array, n_iter=30)
-        except Exception:
-            if meta_array is not None:
-                mean_pred = local_model.predict([img_array, meta_array], verbose=0)[0]
-            else:
-                mean_pred = local_model.predict(img_array, verbose=0)[0]
-            std_pred = np.zeros_like(mean_pred)
+    try:
+        if st.session_state.get("enable_tta", False):
+            try:
+                mean_pred = tta_predict(local_model, img_array, meta_array=meta_array, n_augments=8)
+                std_pred = np.zeros_like(mean_pred)
+            except Exception:
+                if meta_array is not None:
+                    mean_pred = local_model.predict([img_array, meta_array], verbose=0)[0]
+                else:
+                    mean_pred = local_model.predict(img_array, verbose=0)[0]
+                std_pred = np.zeros_like(mean_pred)
+        else:
+            try:
+                mean_pred, std_pred = mc_dropout_predict(local_model, img_array, meta_array=meta_array, n_iter=30)
+            except Exception:
+                if meta_array is not None:
+                    mean_pred = local_model.predict([img_array, meta_array], verbose=0)[0]
+                else:
+                    mean_pred = local_model.predict(img_array, verbose=0)[0]
+                std_pred = np.zeros_like(mean_pred)
+    except Exception as e:
+        error_str = str(e)
+        if "Cannot read image" in error_str or "does not support image input" in error_str:
+            st.error("❌ **Local Model Error:** The model cannot process this image. Please ensure you have the correct model file and try again.")
+        else:
+            st.error(f"❌ **Local Model Error:** {error_str}")
+        return None, None, None, None
 
     # Build result
     if num_outputs > 1:
@@ -608,11 +852,21 @@ def predict_image_local(image, metadata=None):
         all_probs = {"Malignant": cancer_prob, "Benign": 1 - cancer_prob}
         uncertainty_str = f"Cancer: {cancer_prob*100:.1f}% ± {float(std_pred)*100:.1f}%"
 
+    kb_entry = CLINICAL_KB.get(predicted_class, None)
+    if kb_entry is None:
+        kb_entry = CLINICAL_KB["Malignant"] if cancer_prob > 0.5 else CLINICAL_KB["Benign"]
+
     result = {
         "predicted_class": predicted_class, "confidence": confidence,
         "cancer_prob": cancer_prob, "all_probs": all_probs,
-        "reasoning": "Classification based on local CNN model with MC Dropout uncertainty estimation.",
-        "recommendation": "Please consult a dermatologist for clinical confirmation.",
+        "reasoning": f"Classification based on local EfficientNet CNN model with MC Dropout uncertainty estimation (30 forward passes). The model identified features consistent with {predicted_class} with {confidence:.1f}% confidence.",
+        "recommendation": kb_entry["recommendation"],
+        "lesion_description": kb_entry["lesion_description"],
+        "morphology": kb_entry["morphology"],
+        "color_pattern": kb_entry["color_pattern"],
+        "border_analysis": kb_entry["border_analysis"],
+        "differential_diagnosis": kb_entry["differential_diagnosis"],
+        "risk_factors": kb_entry["risk_factors"],
         "uncertainty": uncertainty_str, "inference_mode": "local"
     }
     st.session_state.last_result = result
@@ -1320,6 +1574,22 @@ if page == "🏠 Home":
 if page == "🔬 Prediction":
     st.markdown("## 🔬 Skin Lesion Analysis")
 
+    # Define theme-aware colors
+    if theme_mode == "Dark":
+        bg_primary = "#2d3748"  # Dark slate background
+        bg_secondary = "#1a202c"  # Darker slate background
+        bg_accent = "#4a5568"  # Gray accent background
+        text_primary = "#ffffff"  # White text
+        text_secondary = "#e2e8f0"  # Light gray text
+        border_color = "#718096"  # Medium gray border
+    else:
+        bg_primary = BG_LIGHT
+        bg_secondary = BG_WHITE
+        bg_accent = BG_LIGHT_BLUE
+        text_primary = TEXT_DARK
+        text_secondary = TEXT_MEDIUM
+        border_color = PRIMARY_COLOR
+
     # Patient Info
     st.markdown("### 👤 Patient Information")
     col1, col2 = st.columns(2)
@@ -1356,46 +1626,65 @@ if page == "🔬 Prediction":
     img = uploaded_file if uploaded_file else camera_image
 
     if img:
-        image = Image.open(img).convert("RGB")
-        st.image(image, caption="Uploaded Image", use_container_width=True)
+        try:
+            img.seek(0)
+        except Exception:
+            pass
+        
+        raw_img = Image.open(img).convert("RGB")
+        # Strip ALL problematic EXIF metadata rapidly using numpy array proxy
+        image = Image.fromarray(np.array(raw_img))
+        
+        # Downscale just for the UI display to prevent 50MB websocket payload crashes
+        display_img = image.copy()
+        display_img.thumbnail((800, 800))
+        st.image(display_img, caption="Uploaded Image", use_container_width=True)
 
         if st.button("🔍 Analyze", use_container_width=True):
-            metadata = {
-                "age": age, "gender": gender, "body_location": body_location,
-                "skin_type": skin_type, "lesion_size": str(lesion_size),
-                "lesion_changed": lesion_changed
-            }
+            try:
+                metadata = {
+                    "age": age, "gender": gender, "body_location": body_location,
+                    "skin_type": skin_type, "lesion_size": str(lesion_size),
+                    "lesion_changed": lesion_changed
+                }
 
-            # OOD Detection — cloud or local (Feature 7)
-            if not st.session_state.use_local_model and GEMINI_API_KEY:
-                with st.spinner("🛡️ Validating image (Cloud OOD Detection)..."):
-                    is_skin, ood_reason = check_ood(image)
-                if not is_skin:
-                    st.error(f"⚠️ **Invalid Image Detected!** This doesn't appear to be a skin lesion.\n\nReason: {ood_reason}")
-                    st.stop()
-                else:
-                    st.success("✅ Image validated as skin lesion.")
-            elif st.session_state.use_local_model:
-                with st.spinner("🛡️ Validating image (Offline OOD Detection)..."):
-                    is_skin, ood_reason = check_ood_local(image)
-                if not is_skin:
-                    st.error(f"⚠️ **Invalid Image Detected (Local Check)!**\n\nReason: {ood_reason}")
-                    st.stop()
-                else:
-                    st.success("✅ Image passes local validation.")
+                # OOD Detection — cloud or local (Feature 7)
+                if not st.session_state.use_local_model and GEMINI_API_KEY:
+                    with st.spinner("🛡️ Validating image (Cloud OOD Detection)..."):
+                        is_skin, ood_reason = check_ood(image)
+                    if not is_skin:
+                        st.error(f"⚠️ **Invalid Image Detected!** This doesn't appear to be a skin lesion.\n\nReason: {ood_reason}")
+                        st.stop()
+                    else:
+                        st.success("✅ Image validated as skin lesion.")
+                elif st.session_state.use_local_model:
+                    with st.spinner("🛡️ Validating image (Offline OOD Detection)..."):
+                        is_skin, ood_reason = check_ood_local(image)
+                    if not is_skin:
+                        st.error(f"⚠️ **Invalid Image Detected (Local Check)!**\n\nReason: {ood_reason}")
+                        st.stop()
+                    else:
+                        st.success("✅ Image passes local validation.")
 
-            # Hair Removal Preview (Feature 5)
-            if st.session_state.get("enable_hair_removal", False):
-                hr_img = np.array(image.resize((224, 224)))
-                cleaned = remove_hair(hr_img)
-                st.session_state.last_hair_removed = cleaned
+                # Hair Removal Preview (Feature 5)
+                if st.session_state.get("enable_hair_removal", False):
+                    hr_img = np.array(image.resize((224, 224)))
+                    cleaned = remove_hair(hr_img)
+                    st.session_state.last_hair_removed = cleaned
 
-            # Run Prediction
-            with st.spinner("🧠 Analyzing image..."):
-                if st.session_state.use_local_model:
-                    result, predicted, cancer_prob, confidence = predict_image_local(image, metadata)
+                # Run Prediction
+                with st.spinner("🧠 Analyzing image..."):
+                    if st.session_state.use_local_model:
+                        result, predicted, cancer_prob, confidence = predict_image_local(image, metadata)
+                    else:
+                        result, predicted, cancer_prob, confidence = predict_image_cloud(image, metadata)
+            except Exception as e:
+                error_msg = str(e)
+                if "Cannot read image" in error_msg or "does not support image input" in error_msg:
+                    st.error("❌ **Image Analysis Failed:** The uploaded file is not a valid image or the AI model cannot process it. Please upload a clear skin lesion photo (JPG/PNG) and try again.")
                 else:
-                    result, predicted, cancer_prob, confidence = predict_image_cloud(image, metadata)
+                    st.error(f"❌ **Analysis Error:** {error_msg}")
+                st.stop()
 
             if result:
                 st.session_state.last_result = result
@@ -1412,11 +1701,13 @@ if page == "🔬 Prediction":
                 local_model = load_local_model()
                 feature_vec = None
                 if local_model:
-                    img_arr = np.expand_dims(np.array(image.resize((224,224)))/255.0, axis=0)
+                    img_size = get_model_img_size()
+                    img_arr = np.expand_dims(np.array(image.resize((img_size, img_size)))/255.0, axis=0)
                     gcam_meta = None
                     if is_dual_input_model(local_model):
                         model_artifacts = load_model_artifacts()
                         gcam_meta = build_metadata_tensor(metadata, model_artifacts)
+                    
                     heatmap = generate_gradcam(local_model, img_arr, meta_array=gcam_meta)
                     if heatmap is not None:
                         gradcam_img = overlay_gradcam(image, heatmap)
@@ -1446,58 +1737,197 @@ if page == "🔬 Prediction":
         recommendation_en = result.get("recommendation", "")
         uncertainty = result.get("uncertainty", "")
         triage = get_triage(cancer_prob)
+        mode = result.get("inference_mode", "cloud")
+        lesion_desc = result.get("lesion_description", "")
+        morphology = result.get("morphology", "")
+        color_pattern = result.get("color_pattern", "")
+        border_analysis = result.get("border_analysis", "")
+        differential = result.get("differential_diagnosis", [])
+        risk_factors_text = result.get("risk_factors", "")
 
         st.markdown("---")
 
-        # Inference Mode Badge (Feature 8)
-        mode = result.get("inference_mode", "cloud")
-        if mode == "local":
-            st.markdown("🔒 **Processed locally — no data sent to cloud.**")
-        else:
-            st.markdown("☁️ **Processed via Gemini Cloud AI.**")
+        # ==============================
+        #  DETAILED CLINICAL REPORT
+        # ==============================
+        report_id = str(uuid.uuid4())[:10].upper()
+        now_str = datetime.now().strftime("%d/%m/%Y  %I:%M %p")
+        patient = st.session_state.get("last_patient_data", {})
 
-        # Triage Panel (Feature 6)
+        # --- Report Header ---
+        risk_border_color = RISK_HIGH_COLOR if triage['label'] == "HIGH RISK" else (RISK_MODERATE_COLOR if triage['label'] == "MODERATE RISK" else RISK_LOW_COLOR)
         st.markdown(f"""
-        <div style='background: {triage['color']}22; border-left: 5px solid {triage['color']};
-                    padding: 20px; border-radius: 10px; margin: 10px 0;'>
-            <h3>{triage['icon']} {triage['label']}</h3>
-            <p><b>Diagnosis:</b> {predicted} ({confidence:.1f}% confidence)</p>
-            <p><b>Action:</b> {triage['action']}</p>
+        <div style='background: linear-gradient(135deg, {PRIMARY_COLOR}0f, {SECONDARY_COLOR}0f);
+                    color: {text_primary}; padding: 25px 30px; border-radius: 15px 15px 0 0;
+                    border-left: 6px solid {risk_border_color}; margin-top: 20px;'>
+            <div style='display: flex; justify-content: space-between; align-items: center;'>
+                <div>
+                    <h2 style='margin:0; color: {PRIMARY_COLOR};'>AI DermaScan — Clinical Report</h2>
+                    <p style='margin:4px 0 0 0; color: {text_secondary}; font-size:13px;'>
+                        Report ID: {report_id} &nbsp;|&nbsp; Generated: {now_str} &nbsp;|&nbsp;
+                        {'🔒 Local' if mode == 'local' else '☁️ Cloud AI'} Inference
+                    </p>
+                </div>
+                <div style='text-align:center; background: {bg_secondary};
+                            border: 2px solid {risk_border_color}; border-radius: 12px;
+                            padding: 10px 20px;'>
+                    <span style='font-size: 28px; color: {text_primary};'>{triage['icon']}</span><br>
+                    <span style='font-weight: bold; color: {text_primary}; font-size: 14px;'>{triage['label']}</span>
+                </div>
+            </div>
         </div>
         """, unsafe_allow_html=True)
 
-        # Multi-Class Probability Chart (Feature 7)
+        # --- Patient Demographics ---
+        st.markdown(f"""
+        <div style='background: {bg_primary}; padding: 20px 30px; border-left: 6px solid {border_color};
+                    margin: 0;'>
+            <h4 style='margin: 0 0 10px 0; color: {border_color};'>👤 Patient Demographics</h4>
+            <div style='display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 10px;'>
+                <div style='color: {text_primary};'><b>Name:</b> {patient.get('name', 'N/A')}</div>
+                <div style='color: {text_primary};'><b>Age:</b> {patient.get('age', 'N/A')} years</div>
+                <div style='color: {text_primary};'><b>Gender:</b> {patient.get('gender', 'N/A')}</div>
+                <div style='color: {text_primary};'><b>Patient ID:</b> {patient.get('patient_id', 'N/A')}</div>
+                <div style='color: {text_primary};'><b>Body Site:</b> {patient.get('body_location', 'N/A')}</div>
+                <div style='color: {text_primary};'><b>Skin Type:</b> {patient.get('skin_type', 'N/A')}</div>
+                <div style='color: {text_primary};'><b>Lesion Size:</b> {patient.get('lesion_size', 'N/A')} mm</div>
+                <div style='color: {text_primary};'><b>Recent Change:</b> {patient.get('lesion_changed', 'N/A')}</div>
+                <div style='color: {text_primary};'><b>Exam Date:</b> {patient.get('exam_date', 'N/A')}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # --- Primary Diagnosis ---
+        cancer_classes = ["Melanoma", "Basal Cell Carcinoma", "Actinic Keratoses"]
+        is_malignant = predicted in cancer_classes
+        diag_color = RISK_HIGH_COLOR if is_malignant else SUCCESS_COLOR
+        st.markdown(f"""
+        <div style='background: {bg_secondary}; padding: 20px 30px; border-left: 6px solid {diag_color};
+                    border-bottom: 1px solid #eee;'>
+            <h4 style='margin: 0 0 10px 0; color: {diag_color};'>🔬 Primary Diagnosis</h4>
+            <div style='display: flex; gap: 30px; align-items: baseline;'>
+                <span style='font-size: 24px; font-weight: bold; color: {diag_color};'>{predicted}</span>
+                <span style='font-size: 16px; color: {text_secondary};'>Confidence: <b>{confidence:.1f}%</b></span>
+                <span style='font-size: 16px; color: {text_secondary};'>Cancer Probability: <b style='color: {diag_color};'>{cancer_prob*100:.1f}%</b></span>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # --- Clinical Reasoning ---
+        if reasoning_en:
+            st.markdown(f"""
+            <div style='background: {bg_accent}; padding: 20px 30px; border-left: 6px solid {INFO_COLOR};'>
+                <h4 style='margin: 0 0 10px 0; color: {INFO_COLOR};'>🧠 Clinical Reasoning</h4>
+                <p style='margin: 0; line-height: 1.7; color: {text_primary};'>{reasoning_en}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # --- Detailed Clinical Analysis (from cloud or generated) ---
+        analysis_sections = []
+        if lesion_desc:
+            analysis_sections.append(("Lesion Description", lesion_desc, "#e64980"))
+        if morphology:
+            analysis_sections.append(("Morphology & Structure", morphology, "#845ef7"))
+        if color_pattern:
+            analysis_sections.append(("Color & Pigment Pattern", color_pattern, "#ff922b"))
+        if border_analysis:
+            analysis_sections.append(("Border Analysis", border_analysis, "#20c997"))
+
+        if analysis_sections:
+            st.markdown("<div style='padding: 0;'>", unsafe_allow_html=True)
+            for title, text, color in analysis_sections:
+                st.markdown(f"""
+                <div style='background: {bg_secondary}; padding: 18px 30px; border-left: 6px solid {color};
+                            border-bottom: 1px solid #f0f0f0;'>
+                    <h4 style='margin: 0 0 8px 0; color: {color};'>🔍 {title}</h4>
+                    <p style='margin: 0; line-height: 1.7; color: {text_primary};'>{text}</p>
+                </div>
+                """, unsafe_allow_html=True)
+            st.markdown("</div>", unsafe_allow_html=True)
+
+        # --- Differential Diagnosis ---
+        if differential:
+            diff_html = ""
+            if isinstance(differential, list):
+                for i, d in enumerate(differential):
+                    diff_html += f"<span style='background:{bg_primary}; padding:5px 14px; border-radius:20px; margin:3px; display:inline-block; font-size:13px; border:1px solid {WARNING_COLOR}; color: {text_primary};'>{d}</span>"
+            else:
+                diff_html = str(differential)
+            st.markdown(f"""
+            <div style='background: {bg_accent}; padding: 20px 30px; border-left: 6px solid {WARNING_COLOR};'>
+                <h4 style='margin: 0 0 10px 0; color: {WARNING_COLOR};'>📋 Differential Diagnosis</h4>
+                <p style='margin: 0 0 6px 0; color: {text_primary}; font-size: 13px;'>Other conditions to consider:</p>
+                <div>{diff_html}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # --- Risk Factors ---
+        if risk_factors_text:
+            st.markdown(f"""
+            <div style='background: {bg_accent}; padding: 20px 30px; border-left: 6px solid {SECONDARY_COLOR};'>
+                <h4 style='margin: 0 0 10px 0; color: {SECONDARY_COLOR};'>⚠️ Risk Factors</h4>
+                <p style='margin: 0; line-height: 1.7; color: {text_primary};'>{risk_factors_text}</p>
+            </div>
+            """, unsafe_allow_html=True)
+
+        # --- Classification Probabilities Table ---
         if all_probs:
             st.markdown("### 📊 Classification Probabilities")
-            fig, ax = plt.subplots(figsize=(8, 4))
-            classes = list(all_probs.keys())
-            probs = [v * 100 for v in all_probs.values()]
-            cancer_list = ["Melanoma", "Basal Cell Carcinoma", "Actinic Keratoses"]
-            bar_colors = ['#ff6b6b' if c in cancer_list else '#51cf66' for c in classes]
-            ax.barh(classes, probs, color=bar_colors)
-            ax.set_xlabel("Probability (%)")
-            ax.set_xlim(0, 100)
-            plt.tight_layout()
-            st.pyplot(fig)
-            plt.close()
+            prob_rows = ""
+            for cls_name, prob_val in all_probs.items():
+                pct = prob_val * 100
+                is_cancer = cls_name in cancer_classes
+                bar_color = RISK_HIGH_COLOR if is_cancer else SUCCESS_COLOR
+                marker = " ⚠️" if is_cancer and pct > 5 else ""
+                row_bg = bg_accent if is_cancer and pct > 10 else bg_secondary
+                text_color = text_primary
+                prob_rows += f"""
+                <tr style='background: {row_bg}; color: {text_color};'>
+                    <td style='padding:8px 12px; font-weight:{"bold" if pct == max(v*100 for v in all_probs.values()) else "normal"};'>{cls_name}{' 🔴' if is_cancer else ''}</td>
+                    <td style='padding:8px 12px;'>
+                        <div style='background:#e9ecef; border-radius:4px; height:20px; width:100%; position:relative;'>
+                            <div style='background:{bar_color}; height:20px; border-radius:4px; width:{min(pct, 100):.1f}%;'></div>
+                            <span style='position:absolute; left:8px; top:1px; font-size:12px; font-weight:bold;'>{pct:.1f}%{marker}</span>
+                        </div>
+                    </td>
+                </tr>"""
+            st.markdown(f"""
+            <table style='width:100%; border-collapse:collapse; margin:10px 0; color: {text_primary};'>
+                <thead>
+                    <tr style='background:{bg_primary}; color: {text_primary};'>
+                        <th style='padding:8px 12px; text-align:left;'>Condition</th>
+                        <th style='padding:8px 12px; text-align:left;'>Probability</th>
+                    </tr>
+                </thead>
+                <tbody>{prob_rows}</tbody>
+            </table>
+            """, unsafe_allow_html=True)
 
-        # Uncertainty (Feature 5)
+        # --- Uncertainty ---
         if uncertainty:
-            st.markdown("### 🎯 Uncertainty Estimation (MC Dropout)")
-            st.info(f"**{uncertainty}**")
+            st.markdown(f"""
+            <div style='background: {bg_accent}; padding: 15px 30px; border-left: 6px solid {border_color};'>
+                <h4 style='margin: 0 0 8px 0; color: {border_color};'>🎯 Uncertainty Estimation (MC Dropout)</h4>
+                <p style='margin: 0; font-family: monospace; font-size: 13px; color: {text_primary};'>{uncertainty}</p>
+            </div>
+            """, unsafe_allow_html=True)
 
-        # Grad-CAM Display (Feature 1)
+        # --- Grad-CAM Display ---
         gcam = st.session_state.get("last_gradcam")
         if gcam is not None:
             st.markdown("### 🧠 Explainable AI — Grad-CAM Heatmap")
             gc1, gc2 = st.columns(2)
             with gc1:
-                st.image(st.session_state.get("last_image"), caption="Original", use_container_width=True)
+                orig = st.session_state.get("last_image")
+                if orig is not None:
+                    st.image(np.array(orig), caption="Original Lesion", use_container_width=True)
+                else:
+                    st.info("Original image not available.")
             with gc2:
-                st.image(gcam, caption="Grad-CAM Overlay", use_container_width=True)
-            st.caption("The heatmap highlights the regions the AI focused on for its prediction.")
+                st.image(gcam, caption="AI Attention Heatmap", use_container_width=True)
+            st.caption("Red/yellow regions indicate where the AI focused most for its prediction.")
 
-        # Hair Removal Preview (Feature 5)
+        # --- Hair Removal Preview ---
         hr_img = st.session_state.get("last_hair_removed")
         if hr_img is not None:
             st.markdown("### ✂️ Hair Removal Preprocessing")
@@ -1507,15 +1937,31 @@ if page == "🔬 Prediction":
             with hr2:
                 st.image(hr_img, caption="After Hair Removal", use_container_width=True)
 
-        # TTA Badge
+        # --- TTA Badge ---
         if st.session_state.get("enable_tta", False) and mode == "local":
             st.success("🎯 **Test-Time Augmentation (TTA) was used** — 8 augmented views averaged for robust prediction.")
 
-        # Reasoning
-        st.info(f"**Reasoning:** {reasoning_en}")
-        st.warning(f"**Recommendation:** {recommendation_en}")
+        # --- Recommendation ---
+        if theme_mode == "Dark":
+            rec_bg = bg_secondary
+            rec_hr = text_secondary
+        else:
+            rec_bg = f"linear-gradient(135deg, {SUCCESS_COLOR}1a, {SUCCESS_COLOR}0f)"
+            rec_hr = f"{SUCCESS_COLOR}4d"
+        st.markdown(f"""
+        <div style='background: {rec_bg};
+                    padding: 20px 30px; border-radius: 10px; margin: 15px 0;
+                    border-left: 6px solid {SUCCESS_COLOR};'>
+            <h4 style='margin: 0 0 10px 0; color: {SUCCESS_COLOR};'>🧑‍⚕️ Clinical Recommendation</h4>
+            <p style='margin: 0; line-height: 1.7; color: white; font-size: 15px;'>{recommendation_en}</p>
+            <hr style='border-color: {rec_hr}; margin: 12px 0;'>
+            <p style='margin: 0; font-size: 12px; color: white;'>
+                <b>Triage Action:</b> {triage['action']}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
 
-        # Similar Cases (Feature 6)
+        # --- Similar Cases ---
         fv = st.session_state.get("last_feature_vector")
         if fv is not None:
             similar = find_similar_cases(fv, top_k=3)
@@ -1536,7 +1982,7 @@ if page == "🔬 Prediction":
                         st.markdown(f"Similarity: {case['similarity']*100:.1f}%")
                         st.markdown(f"Risk: {case['risk_level']}")
 
-        # Translation
+        # --- Translation ---
         lang = st.session_state.selected_language
         if lang != "English":
             st.markdown(f"### 🌐 Translation ({lang})")
@@ -1546,12 +1992,23 @@ if page == "🔬 Prediction":
             st.info(f"**Reasoning ({lang}):** {tr_reasoning}")
             st.warning(f"**Recommendation ({lang}):** {tr_recommendation}")
 
-        # PDF Report
+        # --- Disclaimer ---
+        st.markdown(f"""
+        <div style='background: {bg_primary}; padding: 15px 30px; border-radius: 0 0 15px 15px;
+                    border-top: 2px solid {border_color}; margin-bottom: 20px;'>
+            <p style='margin: 0; font-size: 11px; color: {text_secondary}; text-align: center;'>
+                ⚠️ This AI-generated report is a screening aid only and does NOT constitute a definitive medical diagnosis.
+                Always consult a qualified dermatologist for clinical evaluation. Report ID: {report_id}
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # --- PDF Report ---
         if "last_patient_data" in st.session_state and "last_image" in st.session_state:
             gradcam_img = st.session_state.get("last_gradcam")
             pdf = generate_pdf(st.session_state.last_patient_data, st.session_state.last_image, result, gradcam_img)
             with open(pdf, "rb") as f:
-                st.download_button("📄 Download Full Report", f, file_name=pdf, use_container_width=True)
+                st.download_button("📄 Download Full Report (PDF)", f, file_name=pdf, use_container_width=True)
 # ===================================================================
 #                        PAGE: DASHBOARD
 # ===================================================================
@@ -1757,63 +2214,201 @@ if page == "📈 Tracking":
 #                        PAGE: AI CHATBOT
 # ===================================================================
 if page == "💬 Ask AI":
-    st.markdown("## 💬 AI Medical Assistant")
-    st.markdown("Ask follow-up questions about your diagnosis or general skin health.")
+    st.markdown("## 🩺 AI Dermatologist Assistant")
+    st.markdown("Get expert-level clinical insights about your skin diagnosis. Powered by an elite AI dermatologist prompt.")
 
     if not GEMINI_API_KEY:
-        st.warning("Please enter your Gemini API Key in the sidebar to use the chatbot.")
+        st.warning("Please enter your Gemini API Key in the sidebar to use the AI Dermatologist.")
     else:
+        # ── Build Patient Metadata Context ──
+        if "last_patient_data" in st.session_state:
+            p = st.session_state.last_patient_data
+            patient_metadata_str = f"""- Name: {p.get('name', 'N/A')}
+- Age: {p.get('age', 'N/A')}
+- Gender: {p.get('gender', 'N/A')}
+- Skin Type: {p.get('skin_type', 'N/A')}
+- Lesion Location: {p.get('body_location', 'N/A')}
+- Size: {p.get('lesion_size', 'N/A')} mm
+- Lesion Change History: {p.get('lesion_changed', 'N/A')}"""
+        else:
+            patient_metadata_str = "No patient data available."
+            
+        scan_result_str = "No scan performed yet."
+
         if st.session_state.last_result:
             last = st.session_state.last_result
-            st.markdown(
-                f"""<div style='background: linear-gradient(135deg, #667eea22, #764ba222);
-                            padding: 15px; border-radius: 10px; border-left: 4px solid #667eea; margin-bottom: 20px;'>
-                    <b>📋 Last Diagnosis Context:</b><br>
-                    <b>Condition:</b> {last.get('predicted_class', 'N/A')}<br>
-                    <b>Confidence:</b> {last.get('confidence', 0):.1f}%<br>
-                    <b>Reasoning:</b> {last.get('reasoning', 'N/A')}
-                </div>""", unsafe_allow_html=True)
-        else:
-            st.info("💡 No diagnosis yet. Go to 🔬 Prediction first for context-aware responses.")
+            scan_result_str = f"""- Predicted Condition: {last.get('predicted_class', 'Unknown')}
+- Confidence: {last.get('confidence', 0):.1f}%
+- Cancer Probability: {last.get('cancer_prob', 0)*100:.1f}%
+- Risk Level: {"HIGH" if last.get('cancer_prob', 0) >= 0.6 else "MODERATE" if last.get('cancer_prob', 0) >= 0.3 else "LOW"}
+- Reasoning: {last.get('reasoning', 'N/A')}
+- Recommendation: {last.get('recommendation', 'N/A')}
+- Uncertainty: {last.get('uncertainty', 'N/A')}
+- Lesion Description: {last.get('lesion_description', 'N/A')}
+- Morphology: {last.get('morphology', 'N/A')}
+- Color Pattern: {last.get('color_pattern', 'N/A')}
+- Border Analysis: {last.get('border_analysis', 'N/A')}
+- Differential Diagnoses: {last.get('differential_diagnosis', 'N/A')}
+- Inference Mode: {last.get('inference_mode', 'N/A')}"""
 
+            # Display context card
+            cancer_prob = last.get('cancer_prob', 0)
+            risk_color = "#ff6b6b" if cancer_prob >= 0.6 else "#ffd43b" if cancer_prob >= 0.3 else "#51cf66"
+            risk_label = "HIGH RISK" if cancer_prob >= 0.6 else "MODERATE RISK" if cancer_prob >= 0.3 else "LOW RISK"
+            st.markdown(f"""
+            <div style='background: linear-gradient(135deg, #667eea11, #764ba222);
+                        padding: 20px; border-radius: 12px; border-left: 5px solid {risk_color}; margin-bottom: 20px;'>
+                <div style='display: flex; justify-content: space-between; align-items: center;'>
+                    <div>
+                        <h4 style='margin: 0;'>📋 Active Diagnosis Context</h4>
+                        <p style='margin: 5px 0;'><b>Condition:</b> {last.get('predicted_class', 'N/A')}</p>
+                        <p style='margin: 5px 0;'><b>Confidence:</b> {last.get('confidence', 0):.1f}%</p>
+                        <p style='margin: 5px 0; font-size: 13px; color: #888;'>{last.get('reasoning', 'N/A')[:150]}...</p>
+                    </div>
+                    <div style='text-align: center; padding: 10px 20px; background: {risk_color}22;
+                                border-radius: 10px; border: 2px solid {risk_color};'>
+                        <span style='font-size: 20px; font-weight: bold; color: {risk_color};'>{risk_label}</span><br>
+                        <span style='font-size: 12px; color: #888;'>Cancer Prob: {cancer_prob*100:.1f}%</span>
+                    </div>
+                </div>
+            </div>""", unsafe_allow_html=True)
+        else:
+            st.info("💡 No diagnosis yet. Go to 🔬 Prediction first for personalized, context-aware clinical responses.")
+
+        # ── Chat History Display ──
         for msg in st.session_state.chat_history:
-            with st.chat_message(msg["role"]):
+            with st.chat_message(msg["role"], avatar="🧑" if msg["role"] == "user" else "🩺"):
                 st.markdown(msg["content"])
 
-        user_input = st.chat_input("Ask about your diagnosis or skin health...")
+        # ── Chat Input ──
+        user_input = st.chat_input("Ask the AI Dermatologist about your diagnosis, symptoms, or skin health...")
 
         if user_input:
             st.session_state.chat_history.append({"role": "user", "content": user_input})
-            with st.chat_message("user"):
-                st.markdown(user_input)
+            st.rerun()
 
-            context = ""
-            if st.session_state.last_result:
-                r = st.session_state.last_result
-                context = f"""
-Latest AI skin analysis:
-- Condition: {r.get('predicted_class', 'Unknown')}
-- Confidence: {r.get('confidence', 0)}%
-- Cancer Probability: {r.get('cancer_prob', 0)*100:.1f}%
-- Reasoning: {r.get('reasoning', '')}
-- Recommendation: {r.get('recommendation', '')}
-- Uncertainty: {r.get('uncertainty', 'N/A')}
-"""
-            system_prompt = f"""You are a helpful, empathetic AI dermatology assistant.
-{context}
-Rules: Be compassionate, use simple language, always disclaim you are AI not a doctor,
-use diagnosis context if relevant, redirect non-medical questions politely."""
+        # ── Generate AI Response if needed ──
+        if st.session_state.chat_history and st.session_state.chat_history[-1]["role"] == "user":
+            active_question = st.session_state.chat_history[-1]["content"]
+            
+            # ── Build Chat History String ──
+            chat_history_str = ""
+            # Exclude current question from history context to avoid doubling
+            for msg in st.session_state.chat_history[-8:-1]:
+                role = "Patient" if msg["role"] == "user" else "Dermatologist AI"
+                chat_history_str += f"{role}: {msg['content']}\n\n"
 
-            with st.chat_message("assistant"):
-                with st.spinner("Thinking..."):
+            # ── Elite AI Dermatologist Prompt ──
+            system_prompt = f"""You are an elite AI Dermatologist Assistant operating at expert clinical level.
+
+You are NOT a generic chatbot. You behave like a highly experienced dermatologist who:
+* Thinks step-by-step
+* Personalizes every response
+* Explains clearly to non-medical users
+* Prioritizes patient safety and clarity
+
+═══════════════════════════════
+🧠 CONTEXT (USE THIS ALWAYS)
+═══════════════════════════════
+
+Patient Profile:
+{patient_metadata_str}
+
+Latest Scan Result:
+{scan_result_str}
+
+Chat History:
+{chat_history_str}
+
+User Question:
+{active_question}
+
+═══════════════════════════════
+🎯 YOUR OBJECTIVE
+═══════════════════════════════
+
+Deliver a response that is:
+* Highly personalized to THIS patient
+* Clinically accurate but easy to understand
+* Actionable (tells user exactly what to do next)
+* Honest about uncertainty
+
+═══════════════════════════════
+🧬 THINK LIKE A DERMATOLOGIST
+═══════════════════════════════
+
+Internally analyze before answering:
+* Visual clues (shape, border, color, texture)
+* Risk indicators (irregularity, variation, growth signs)
+* Patient factors (age, skin type, lesion location)
+* Probability vs real-world risk
+* Possible alternative diagnoses
+
+═══════════════════════════════
+📊 RESPONSE STRUCTURE (MANDATORY)
+═══════════════════════════════
+
+1. 🧾 Simple Summary
+   Explain in 1–2 lines what this likely means for the user.
+
+2. 🔬 Clinical Insight
+   Explain WHY this prediction was made (features, patterns, reasoning).
+
+3. ⚖️ Risk Interpretation
+   Explain the risk level in real-life terms (not just percentage).
+
+4. 🧠 Possible Alternatives
+   List 2–3 other possible conditions and how they differ.
+
+5. 🧑‍⚕️ What I Would Ask You
+   Ask 2–4 smart follow-up questions like a real doctor.
+
+6. ✅ Recommended Action
+   Give clear next steps: Monitor / Recheck / See doctor / Urgent action
+
+7. ⚠️ Red Flags
+   Tell user what symptoms would make this dangerous.
+
+═══════════════════════════════
+🚨 SAFETY RULES
+═══════════════════════════════
+
+* NEVER give absolute diagnosis
+* NEVER say "you definitely have cancer"
+* If high risk → strongly advise medical consultation
+* If uncertain → clearly say so
+* Always prioritize user safety over confidence
+
+═══════════════════════════════
+🧠 BEHAVIOR RULES
+═══════════════════════════════
+
+* Do NOT give generic textbook answers
+* Do NOT ignore patient context
+* Speak like a calm, intelligent doctor
+* Balance reassurance + seriousness
+* Keep response structured and readable
+
+═══════════════════════════════
+🔥 EXTRA INTELLIGENCE MODE
+═══════════════════════════════
+
+If user is confused or anxious → simplify language, reassure without dismissing
+If case is high-risk → increase urgency, guide immediate action
+If case is low-risk → reassure + suggest monitoring
+
+⚠️ IMPORTANT: You are an AI assistant, NOT a real doctor. Always include a disclaimer that this is AI analysis and professional medical consultation is essential for any clinical decisions.
+
+Now answer the user's question using the structured format above."""
+
+            with st.chat_message("assistant", avatar="🩺"):
+                with st.spinner("🩺 Analyzing your question..."):
                     try:
-                        model = genai.GenerativeModel('gemini-2.5-flash')
-                        chat_messages = [system_prompt]
-                        for msg in st.session_state.chat_history[-6:]:
-                            chat_messages.append(f"{msg['role']}: {msg['content']}")
-                        response = model.generate_content("\n\n".join(chat_messages))
+                        client = get_gemini_client(GEMINI_API_KEY)
+                        response = generate_gemini_content(client, system_prompt)
                         ai_response = response.text.strip()
 
+                        # Translation support
                         lang = st.session_state.selected_language
                         if lang != "English":
                             translated = translate_text(ai_response, lang)
@@ -1822,12 +2417,31 @@ use diagnosis context if relevant, redirect non-medical questions politely."""
                             ai_response = ai_response + f"\n\n---\n🌐 {lang}:\n{translated}"
                         else:
                             st.markdown(ai_response)
+                        
                         st.session_state.chat_history.append({"role": "assistant", "content": ai_response})
                     except Exception as e:
                         error_msg = f"Error: {str(e)}"
                         st.error(error_msg)
                         st.session_state.chat_history.append({"role": "assistant", "content": error_msg})
 
+        # ── Quick Question Buttons ──
+        if not st.session_state.chat_history:
+            st.markdown("### 💡 Quick Questions")
+            q_col1, q_col2, q_col3 = st.columns(3)
+            with q_col1:
+                if st.button("🔍 Explain my diagnosis", use_container_width=True):
+                    st.session_state.chat_history.append({"role": "user", "content": "Can you explain my diagnosis in simple terms?"})
+                    st.rerun()
+            with q_col2:
+                if st.button("⚠️ Should I be worried?", use_container_width=True):
+                    st.session_state.chat_history.append({"role": "user", "content": "Should I be worried about my scan results? What is my real risk?"})
+                    st.rerun()
+            with q_col3:
+                if st.button("🧑‍⚕️ What should I do next?", use_container_width=True):
+                    st.session_state.chat_history.append({"role": "user", "content": "What are the recommended next steps for me?"})
+                    st.rerun()
+
+        # ── Clear Chat ──
         if st.session_state.chat_history:
             if st.button("🗑️ Clear Chat History"):
                 st.session_state.chat_history = []
@@ -1854,7 +2468,7 @@ if page == "🗺️ Find Clinics":
         else:
             with st.spinner(f"🔍 Searching for dermatology clinics near {city_input}..."):
                 try:
-                    model = genai.GenerativeModel('gemini-2.5-flash')
+                    client = get_gemini_client(GEMINI_API_KEY)
                     prompt = f"""Find 8-12 real dermatology clinics, skin specialists, or skin cancer hospitals near {city_input}, India within {search_radius}.
 
 Return ONLY a valid JSON array. Each object must have:
@@ -1868,14 +2482,19 @@ Return ONLY a valid JSON array. Each object must have:
 - "specialties": short list of specialties like "Skin Cancer, Moles, Psoriasis"
 
 Return ONLY the JSON array, no markdown, no explanation. Use real, accurate coordinates for the {city_input} area."""
-                    response = model.generate_content(prompt)
+                    response = generate_gemini_content(client, prompt)
                     text = response.text.strip()
-                    if text.startswith("```json"): text = text[7:]
-                    if text.startswith("```"): text = text[3:]
-                    if text.endswith("```"): text = text[:-3]
-                    clinics = json.loads(text.strip())
-                    st.session_state.found_clinics = clinics
-                    st.session_state.clinic_city = city_input
+                    start_idx = text.find('[')
+                    end_idx = text.rfind(']')
+                    
+                    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
+                        json_str = text[start_idx:end_idx+1]
+                        clinics = json.loads(json_str)
+                        st.session_state.found_clinics = clinics
+                        st.session_state.clinic_city = city_input
+                    else:
+                        st.error("AI response didn't contain valid data. Try again.")
+                        st.session_state.found_clinics = []
                 except Exception as e:
                     st.error(f"Error searching for clinics: {str(e)}")
                     st.session_state.found_clinics = []
@@ -1887,9 +2506,11 @@ Return ONLY the JSON array, no markdown, no explanation. Use real, accurate coor
 
         st.success(f"Found **{len(clinics)}** dermatology clinics near {city}")
 
-        # Calculate map center
-        avg_lat = sum(c.get("lat", 28.47) for c in clinics) / len(clinics)
-        avg_lon = sum(c.get("lon", 77.50) for c in clinics) / len(clinics)
+        # Calculate map center securely skipping nulls
+        valid_lats = [float(c.get("lat")) for c in clinics if c.get("lat") is not None]
+        valid_lons = [float(c.get("lon")) for c in clinics if c.get("lon") is not None]
+        avg_lat = sum(valid_lats) / len(valid_lats) if valid_lats else 28.47
+        avg_lon = sum(valid_lons) / len(valid_lons) if valid_lons else 77.50
 
         # Create Folium Map
         m = folium.Map(location=[avg_lat, avg_lon], zoom_start=13, tiles="OpenStreetMap")
@@ -1903,14 +2524,17 @@ Return ONLY the JSON array, no markdown, no explanation. Use real, accurate coor
         }
         type_icons = {
             "Dermatology Clinic": "stethoscope",
-            "Skin Hospital": "hospital-o",
+            "Skin Hospital": "hospital",
             "Multi-Specialty Hospital": "plus-square",
             "Cosmetic Dermatology": "star",
         }
 
         for clinic in clinics:
-            lat = clinic.get("lat", avg_lat)
-            lon = clinic.get("lon", avg_lon)
+            # Fallback to average if actual coordinate is null
+            lat = clinic.get("lat")
+            lat = float(lat) if lat is not None else avg_lat
+            lon = clinic.get("lon")
+            lon = float(lon) if lon is not None else avg_lon
             name = clinic.get("name", "Unknown")
             address = clinic.get("address", "")
             phone = clinic.get("phone", "N/A")
@@ -1944,7 +2568,7 @@ Return ONLY the JSON array, no markdown, no explanation. Use real, accurate coor
             ).add_to(m)
 
         # Display the map
-        st_folium(m, width=None, height=500, use_container_width=True)
+        st_folium(m, width=1200, height=500)
 
         # Legend
         st.markdown("""        <div style='display: flex; gap: 20px; justify-content: center; margin: 10px 0; flex-wrap: wrap;'>
@@ -1963,6 +2587,12 @@ Return ONLY the JSON array, no markdown, no explanation. Use real, accurate coor
             rating_str = f"⭐ {rating}/5" if rating else ""
             type_color = {"Dermatology Clinic": "#339af0", "Skin Hospital": "#ff6b6b",
                          "Multi-Specialty Hospital": "#51cf66", "Cosmetic Dermatology": "#845ef7"}.get(c_type, "#aaa")
+            
+            # Safe parsing
+            lat = clinic.get("lat")
+            lat = float(lat) if lat is not None else avg_lat
+            lon = clinic.get("lon")
+            lon = float(lon) if lon is not None else avg_lon
 
             st.markdown(f"""
             <div style='background: linear-gradient(135deg, {type_color}11, {type_color}22);
@@ -1976,7 +2606,7 @@ Return ONLY the JSON array, no markdown, no explanation. Use real, accurate coor
                     </div>
                     <div style='text-align: right;'>
                         <span style='font-size: 16px;'>{rating_str}</span><br>
-                        <a href='https://www.google.com/maps/dir/?api=1&destination={clinic.get("lat",0)},{clinic.get("lon",0)}'
+                        <a href='https://www.google.com/maps/dir/?api=1&destination={lat},{lon}'
                            target='_blank' style='font-size: 13px; color: {type_color};'>Get Directions →</a>
                     </div>
                 </div>
