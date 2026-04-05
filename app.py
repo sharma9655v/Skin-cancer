@@ -1,3 +1,6 @@
+from urllib import response
+
+from certifi import contents
 import streamlit as st
 import os
 os.environ["TF_USE_LEGACY_KERAS"] = "1"
@@ -63,15 +66,16 @@ TEXT_LIGHT = "#888888"
 TEXT_WHITE = "#ffffff"
 
 def get_gemini_client(api_key):
-    """Create a Gemini API client."""
-    return genai.Client(api_key=api_key)
+    genai.configure(api_key=api_key)
+    return genai
 
 def generate_gemini_content(client, contents, model=None):
     """Generate content with Gemini, falling back to alternative model if primary fails."""
     if model is None:
         model = GEMINI_MODEL
     try:
-        response = client.models.generate_content(model=model, contents=contents)
+        model_obj = client.GenerativeModel(model)
+        response = model_obj.generate_content(contents)
         return response
     except Exception:
         try:
@@ -218,7 +222,10 @@ page = st.session_state.active_page
 # Inference Mode Toggle
 st.sidebar.markdown("---")
 st.sidebar.subheader("⚙️ Inference Mode")
-use_local = st.sidebar.toggle("🔒 Use Local Model (Offline/Private)", value=st.session_state.use_local_model)
+use_local = st.sidebar.checkbox(
+    "🔒 Use Local Model (Offline/Private)",
+    value=st.session_state.get("use_local_model", False)
+)
 st.session_state.use_local_model = use_local
 if use_local:
     st.sidebar.success("🔒 Images processed locally. No data sent to cloud.")
@@ -227,11 +234,18 @@ else:
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("🧪 Advanced Options")
-enable_tta = st.sidebar.toggle("🎯 Enable TTA (Higher Accuracy)", value=st.session_state.enable_tta,
-                               help="Test-Time Augmentation: runs 8 augmented versions for more robust predictions. ~8x slower.")
+enable_tta = st.sidebar.checkbox(
+    "🎯 Enable TTA (Higher Accuracy)",
+    value=st.session_state.get("enable_tta", False),
+    help="Test-Time Augmentation: runs 8 augmented versions..."
+)
 st.session_state.enable_tta = enable_tta
-enable_hair = st.sidebar.toggle("✂️ Hair Removal Preprocessing", value=st.session_state.enable_hair_removal,
-                                help="Remove hair artifacts from dermoscopy images before analysis.")
+
+enable_hair = st.sidebar.checkbox(
+    "✂️ Hair Removal Preprocessing",
+    value=st.session_state.get("enable_hair_removal", True),
+    help="Remove hair artifacts from dermoscopy images before analysis."
+)
 st.session_state.enable_hair_removal = enable_hair
 
 theme_mode = st.sidebar.radio("Theme Mode", ["Light", "Dark"])
@@ -421,7 +435,9 @@ def load_local_model():
     if not os.path.exists(MODEL_PATH):
         st.info("Downloading AI model... please wait ⏳")
         with open(MODEL_PATH, "wb") as f:
-            f.write(requests.get(MODEL_URL).content)
+            response = requests.get(MODEL_URL, timeout=60)
+            response.raise_for_status()
+            f.write(response.content)   
 
     # ✅ Load downloaded model FIRST
     if os.path.exists(MODEL_PATH):
