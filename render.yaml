@@ -2,5 +2,8 @@ services:
   - type: web
     name: skin-cancer-app
     env: python
-    buildCommand: pip install -r requirements.txt
+    plan: free
+    buildCommand: |
+      python3.10 -m pip install --upgrade pip
+      python3.10 -m pip install -r requirements.txt
     startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
