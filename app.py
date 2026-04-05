@@ -1667,7 +1667,7 @@ if page == "🔬 Prediction":
         # Downscale just for the UI display to prevent 50MB websocket payload crashes
         display_img = image.copy()
         display_img.thumbnail((800, 800))
-        st.image(display_img, caption="Uploaded Image", use_container_width=True)
+        st.image(display_img, caption="Uploaded Image", use_column_width=True)
 
         if st.button("🔍 Analyze", use_container_width=True):
             try:
