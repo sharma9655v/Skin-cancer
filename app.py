@@ -115,7 +115,8 @@ TRIAGE_LEVELS = {
 }
 
 # ================= DATABASE SETUP =================
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "patient_history.db")
+import tempfile
+DB_PATH = os.path.join(tempfile.gettempdir(), "patient_history.db")
 
 def init_db():
     conn = sqlite3.connect(DB_PATH)
@@ -204,9 +205,10 @@ st.markdown("""
 """, unsafe_allow_html=True)
 
 # ================= SIDEBAR =================
-GEMINI_API_KEY = st.sidebar.text_input("Enter Gemini API Key", type="password")
+import os
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY") or st.secrets.get("GEMINI_API_KEY") or st.sidebar.text_input("Enter Gemini API Key (or set env var)", type="password", help="Set GEMINI_API_KEY env var on Render")
 if not GEMINI_API_KEY:
-    st.sidebar.warning("Enter Gemini API Key for cloud AI features.")
+    st.sidebar.warning("🔑 Set GEMINI_API_KEY env var or enter here for cloud AI features.")
 
 st.sidebar.image("https://cdn-icons-png.flaticon.com/512/2966/2966327.png", width=80)
 st.sidebar.title("Navigation")
@@ -426,49 +428,28 @@ def find_similar_cases(feature_vector, top_k=3):
 # ================= GRAD-CAM =================
 @st.cache_resource
 def load_local_model():
-    base_dir = os.path.dirname(os.path.abspath(__file__))
+    import os
+    model_dir = "/tmp/models"
+    os.makedirs(model_dir, exist_ok=True)
     
-    MODEL_PATH = os.path.join(base_dir, "skin_model.h5")
     MODEL_URL = "https://huggingface.co/vanshikatomar/Skin-Cancer-model/resolve/main/skin_cancer_model_v7_best.h5"
-
-    # Download model
+    MODEL_PATH = os.path.join(model_dir, "skin_cancer_model_v7_best.h5")
+    
+    # Download if not exists (Render cache)
     if not os.path.exists(MODEL_PATH):
-        st.info("Downloading AI model... please wait ⏳")
-        with open(MODEL_PATH, "wb") as f:
-            response = requests.get(MODEL_URL, timeout=60)
+        with st.spinner("🚀 Downloading model (~200MB, one-time)..."):
+            response = requests.get(MODEL_URL, timeout=300, stream=True)
             response.raise_for_status()
-            f.write(response.content)   
-
-    # ✅ Load downloaded model FIRST
-    if os.path.exists(MODEL_PATH):
+            with open(MODEL_PATH, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    f.write(chunk)
+        st.success("✅ Model downloaded!")
+    
+    try:
         return tf.keras.models.load_model(MODEL_PATH, compile=False)
-
-    # Try v7 model first (highest accuracy)
-    model_path_v7 = os.path.join(base_dir, "skin_cancer_model_v7.h5")
-    if os.path.exists(model_path_v7):
-        return tf.keras.models.load_model(model_path_v7, compile=False)
-    
-    # Try v7 final model
-    model_path_v7_final = os.path.join(base_dir, "skin_cancer_model_v7_final.h5")
-    if os.path.exists(model_path_v7_final):
-        return tf.keras.models.load_model(model_path_v7_final, compile=False)
-    
-    # Try v7 best model
-    model_path_v7_best = os.path.join(base_dir, "skin_cancer_model_v7_best.h5")
-    if os.path.exists(model_path_v7_best):
-        return tf.keras.models.load_model(model_path_v7_best, compile=False)
-    
-    # Fallback to v2
-    model_path_v2 = os.path.join(base_dir, "skin_cancer_model_v2.h5")
-    if os.path.exists(model_path_v2):
-        return tf.keras.models.load_model(model_path_v2, compile=False)
-    
-    # Fallback to v1
-    model_path_v1 = os.path.join(base_dir, "skin_cancer_model.h5")
-    if os.path.exists(model_path_v1):
-        return tf.keras.models.load_model(model_path_v1, compile=False)
-    
-    return None
+    except Exception as e:
+        st.warning(f"Local model load failed: {e}. Use Cloud AI mode.")
+        return None
 
 @st.cache_resource
 def load_model_artifacts():
@@ -1013,17 +994,38 @@ def generate_pdf(patient_data, image, result, gradcam_overlay=None):
         return prob_val > 0.5
 
     # ── Save temporary images ──
-    original = np.array(image)
-    resized = cv2.resize(original, (224, 224))
-    cv2.imwrite("original.png", cv2.cvtColor(original, cv2.COLOR_RGB2BGR))
+    import tempfile
+    import tempfile as tf
+    import tempfile as tf
+    temp_dir = tf.gettempdir()
+    
+    # Create unique temp files with proper cleanup
+    temp_files = []
+    
+    # Original image
+    with tf.NamedTemporaryFile(suffix='.png', delete=False, dir=temp_dir) as orig_file:
+        original_path = orig_file.name
+    cv2.imwrite(original_path, cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR))
+    temp_files.append(original_path)
 
+    # Grad-CAM
     if gradcam_overlay is not None:
-        cv2.imwrite("gradcam.png", cv2.cvtColor(gradcam_overlay, cv2.COLOR_RGB2BGR))
+        with tf.NamedTemporaryFile(suffix='.png', delete=False, dir=temp_dir) as gcam_file:
+            gradcam_path = gcam_file.name
+        cv2.imwrite(gradcam_path, cv2.cvtColor(gradcam_overlay, cv2.COLOR_RGB2BGR))
+        temp_files.append(gradcam_path)
     else:
+        with tf.NamedTemporaryFile(suffix='.png', delete=False, dir=temp_dir) as gcam_file:
+            gradcam_path = gcam_file.name
+        resized = cv2.resize(np.array(image), (224, 224))
         heatmap = cv2.applyColorMap(resized, cv2.COLORMAP_JET)
-        cv2.imwrite("gradcam.png", heatmap)
+        cv2.imwrite(gradcam_path, heatmap)
+        temp_files.append(gradcam_path)
 
     # Probability chart
+    with tf.NamedTemporaryFile(suffix='.png', delete=False, dir=temp_dir) as prob_file:
+        prob_path = prob_file.name
+    temp_files.append(prob_path)
     if all_probs:
         plt.figure(figsize=(5.5, 2.5))
         classes_list = list(all_probs.keys())
@@ -1035,7 +1037,7 @@ def generate_pdf(patient_data, image, result, gradcam_overlay=None):
         plt.yticks(fontsize=7)
         plt.xlim(0, 100)
         plt.tight_layout()
-        plt.savefig("prob.png", dpi=150, bbox_inches='tight')
+        plt.savefig(prob_path, dpi=150, bbox_inches='tight')
         plt.close()
     else:
         plt.figure(figsize=(4, 2))
@@ -1043,15 +1045,18 @@ def generate_pdf(patient_data, image, result, gradcam_overlay=None):
                 color=['#CC0000', '#228B22'])
         plt.ylabel("Probability (%)", fontsize=8)
         plt.tight_layout()
-        plt.savefig("prob.png", dpi=150)
+        plt.savefig(prob_path, dpi=150)
         plt.close()
 
-    # Generate QR code
+    # QR Code
+    with tf.NamedTemporaryFile(suffix='.png', delete=False, dir=temp_dir) as qr_file:
+        qr_path = qr_file.name
+    temp_files.append(qr_path)
     qr = qrcode.QRCode(version=1, box_size=4, border=1)
     qr.add_data(f"REPORT-{report_id}|{patient_data.get('name','')}|{predicted}|{confidence:.1f}%")
     qr.make(fit=True)
     qr_img = qr.make_image(fill_color="black", back_color="white")
-    qr_img.save("report_qr.png")
+    qr_img.save(qr_path)
 
     # ── Page Template with header/footer ──
     PAGE_W, PAGE_H = A4
@@ -1342,9 +1347,9 @@ def generate_pdf(patient_data, image, result, gradcam_overlay=None):
     # Images side by side
     try:
         img_table = Table([
-            [RLImage("original.png", width=2.2*inch, height=2.2*inch),
-             RLImage("gradcam.png", width=2.2*inch, height=2.2*inch),
-             RLImage("report_qr.png", width=0.9*inch, height=0.9*inch)],
+            [RLImage(original_path, width=2.2*inch, height=2.2*inch),
+             RLImage(gradcam_path, width=2.2*inch, height=2.2*inch),
+             RLImage(qr_path, width=0.9*inch, height=0.9*inch)],
             [Paragraph("<b>Original Image</b>", ParagraphStyle('ImgCap', parent=style_small, alignment=TA_CENTER)),
              Paragraph("<b>Grad-CAM Heatmap</b>", ParagraphStyle('ImgCap2', parent=style_small, alignment=TA_CENTER)),
              Paragraph("<b>Scan QR</b>", ParagraphStyle('ImgCap3', parent=style_small, alignment=TA_CENTER))],
@@ -1363,7 +1368,7 @@ def generate_pdf(patient_data, image, result, gradcam_overlay=None):
 
     # Probability Chart
     try:
-        elements.append(RLImage("prob.png", width=5.0*inch, height=2.2*inch))
+        elements.append(RLImage(prob_path, width=5.0*inch, height=2.2*inch))
     except Exception:
         pass
 
@@ -1520,6 +1525,14 @@ def generate_pdf(patient_data, image, result, gradcam_overlay=None):
 
     # Build the PDF with header/footer
     doc.build(elements, onFirstPage=draw_header_footer, onLaterPages=draw_header_footer)
+    
+    # Cleanup temp files
+    for temp_file in temp_files:
+        try:
+            os.unlink(temp_file)
+        except (OSError, FileNotFoundError):
+            pass
+    
     return filename
 # ===================================================================
 #                           PAGE: HOME
@@ -1547,7 +1560,7 @@ if page == "🏠 Home":
         """, unsafe_allow_html=True)
         if st.button("Go to Prediction →", key="card_prediction", use_container_width=True):
             st.session_state.active_page = "🔬 Prediction"
-            st.experimental_rerun()
+st.rerun()
     with col2:
         st.markdown("""
         <div style='background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
