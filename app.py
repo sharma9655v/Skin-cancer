@@ -9,8 +9,8 @@ import cv2
 from datetime import datetime
 import uuid
 import qrcode
-from google import genai
 import google.generativeai as genai
+
 import json
 import traceback
 import sqlite3
