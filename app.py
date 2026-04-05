@@ -1547,7 +1547,7 @@ if page == "🏠 Home":
         """, unsafe_allow_html=True)
         if st.button("Go to Prediction →", key="card_prediction", use_container_width=True):
             st.session_state.active_page = "🔬 Prediction"
-            st.rerun()
+            st.experimental_rerun()
     with col2:
         st.markdown("""
         <div style='background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);
