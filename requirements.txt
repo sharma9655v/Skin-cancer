@@ -14,5 +14,4 @@ streamlit-folium>=0.17
 requests>=2.31
 numpy>=1.26
 protobuf
-gunicorn==22.0.0
-sqlite3
+certifi

@@ -3,7 +3,21 @@ services:
     name: skin-cancer-app
     env: python
     plan: free
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false  # Set manually in Render dashboard with your real Gemini API key
+      - key: PYTHON_VERSION
+        value: 3.10.12
     buildCommand: |
-      python3.10 -m pip install --upgrade pip
-      python3.10 -m pip install -r requirements.txt
-    startCommand: streamlit run app.py --server.port $PORT --server.address 0.0.0.0
+      mkdir -p /tmp/models
+      mkdir -p /tmp
+      pip install --upgrade pip
+      pip install -r requirements.txt
+    startCommand: |
+      streamlit run app.py \
+        --server.port $PORT \
+        --server.address 0.0.0.0 \
+        --server.headless true \
+        --server.enableCORS false \
+        --server.enableXsrfProtection false \
+        --browser.gatherUsageStats false
